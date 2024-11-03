@@ -1,9 +1,20 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import math
+import torch
+import multiprocessing as mp
+import plotly.express as px
+import datashader as ds
+import datashader.transfer_functions as tf
+import vispy.plot as vp
+
 from scipy.io import wavfile
 from scipy.signal import correlate
 from scipy.fft import ifft, fft, fftfreq, fftshift, ifft2, fft2
+from scipy.signal import hilbert
+from scipy.signal import hilbert, find_peaks
+from scipy.ndimage import gaussian_filter1d
 
 
 def load_file(path: str, name: str, dct: dict):
@@ -51,7 +62,7 @@ def cut_signal_by_time(index: int, borders: list, df: pd.DataFrame):
     return df['data'][index][ind_borders[0]:ind_borders[1]], df['time'][index][ind_borders[0]:ind_borders[1]], df['name'][index]
 
 
-def plot_cut(borders: list, number: int, df: pd.DataFrame):
+def plot_cut(borders: list, number: int, df: pd.DataFrame, plots: bool):
     dct = {'data': [], 'time': [], 'name': []}
     for i in range(number):
         data, time, name = cut_signal_by_time(index=i, borders=borders, df=df)
@@ -60,13 +71,14 @@ def plot_cut(borders: list, number: int, df: pd.DataFrame):
         dct['name'].append(name)
     df_cut = pd.DataFrame(data=dct)
 
-    for i in range(len(df_cut['data'])):
-        plot_signal(data=df_cut['data'][i]/max(df_cut['data'][i]),
-                    time=df_cut['time'][i], name=df_cut['name'][i])
-        print(
-            f"Максимум по амплитуде: {max(df_cut['data'][i])/max(df_cut['data'][i])}")
-        print(
-            f"Время максимума: {df_cut['time'][i][np.argmax(df_cut['data'][i])]} с.")
+    if plots == True:
+        for i in range(len(df_cut['data'])):
+            plot_signal(data=df_cut['data'][i]/max(df_cut['data'][i]),
+                        time=df_cut['time'][i], name=df_cut['name'][i])
+            print(
+                f"Максимум по амплитуде: {max(df_cut['data'][i])/max(df_cut['data'][i])}")
+            print(
+                f"Время максимума: {df_cut['time'][i][np.argmax(df_cut['data'][i])]} с.")
 
     return df_cut
 
@@ -87,6 +99,7 @@ def corr_f(signal1: np.ndarray, signal2: np.ndarray, sample_rate: int, filter_fr
                     ser1[i] = data1[i]
                     ser2[i] = data2[i]
         corr = fft((ser1)*np.conj(ser2))
+        corr = fftshift(corr)
     else:
         corr = fft((data1)*np.conj((data2)))
         corr = fftshift(corr)
@@ -99,6 +112,18 @@ def corr_f(signal1: np.ndarray, signal2: np.ndarray, sample_rate: int, filter_fr
         lags = lags/sample_rate
 
     return corr, lags
+
+
+def parallel_corr_f(signal1: np.ndarray, signal2: np.ndarray, sample_rate: int, filter_freq: int, do_filter: bool):
+    signal1 = torch.from_numpy(signal1)
+    signal2 = torch.from_numpy(signal2)
+
+    fft_signal1 = torch.fft.fft(signal1)
+    fft_signal2 = torch.fft.fft(signal2)
+
+    corr = torch.fft.fft(fft_signal1 * torch.conj(fft_signal2))
+
+    return corr.real
 
 
 def split_array(arr: np.ndarray, n: int):
@@ -146,3 +171,32 @@ def mean_corr(df: pd.DataFrame, pair: list, n: int):
     corr_lst_abs = split_array(corr_lst_abs, n)
 
     return [np.mean(x) for x in corr_lst_abs]
+
+
+def find_delta_time(corr: np.ndarray, lags: np.ndarray):
+    analytic_signal = hilbert(np.real(corr))
+    envelope = np.abs(analytic_signal)
+    peaks, _ = find_peaks(envelope, distance=40)
+
+    corr_ = corr[10600:13000]
+    lags_ = lags[10600:13000]
+    envelope_ = envelope[10600:13000]
+    envelope_ = gaussian_filter1d(envelope_, sigma=3)
+    peaks_, _ = find_peaks(envelope_, distance=40)
+
+    peak_values = envelope_[peaks_]
+    peak_indices = peaks_
+    top_2_indices = peak_indices[np.argsort(peak_values)[-3:]]
+    top_2_values = envelope_[top_2_indices]
+
+    return lags_[top_2_indices[0]], lags_[top_2_indices[1]], lags_[top_2_indices[2]]
+
+
+def spectrum(time: np.ndarray, data: np.ndarray):
+    T = 1.0 / 44100
+    N = len(time)
+    spectrum = np.fft.fft(data)
+    spectrum = np.abs(spectrum[:N // 2])
+    freq = np.fft.fftfreq(N, T)[:N // 2]
+
+    return freq, spectrum
